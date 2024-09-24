@@ -1,0 +1,352 @@
+# app.py
+
+import os
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+from langchain.chat_models import ChatOpenAI
+from langchain.agents import initialize_agent, AgentType
+from langchain.memory import ConversationBufferMemory
+from langchain.callbacks import StreamlitCallbackHandler
+from langchain.callbacks.base import CallbackManager
+from langchain.tools import StructuredTool
+from langchain.schema import SystemMessage
+
+# Initialize the LLM with streaming and system prompt
+openai_api_key = os.environ["OPENAI_API_KEY"]  # Replace with your method
+llm = ChatOpenAI(
+    model_name="gpt-4-0613",  # Ensure function calling support
+    temperature=0,
+    openai_api_base=os.environ["gw_base_url"],
+    openai_api_key=openai_api_key,
+    streaming=True,
+)
+
+# System prompt to guide the LLM
+system_prompt = """
+You are a helpful assistant for the corporate treasury department.
+
+When a user asks a question, determine the type of question:
+
+1. If the question is about 'haircut' (contains the keyword 'haircut'), collect necessary parameters and call the 'query_dataframe' function to get data.
+
+2. If the question is about FX Rates (e.g., involves currencies, exchange rates, dates), collect necessary parameters and call the 'visualize_fx_rates' function to generate the requested visualization.
+
+3. For other questions, use the 'retrieve_documents' function to search the corpus for relevant information, and provide an informative answer.
+
+Always ensure that you are polite and helpful. If any parameters are missing for a function, ask the user for the missing information.
+"""
+
+# Load your DataFrames
+# Liquidity Data
+df_liquidity = pd.read_csv('liquidity_data.csv')  # Replace with your actual CSV file path
+df_liquidity['Liquidity Variable'] = df_liquidity['Liquidity Variable'].str.lower()
+
+# FX Rates Data
+df_fx_rates = pd.read_csv('FX_Rates.csv')  # Replace with your actual CSV file path
+
+# Preprocess FX Rates Data
+# Melt the DataFrame to have dates in a single column
+date_columns = [col for col in df_fx_rates.columns if '-' in col]
+df_fx_rates_melted = df_fx_rates.melt(id_vars=['Currency', 'Name'], value_vars=date_columns,
+                                      var_name='Date', value_name='FX Rate')
+
+# Convert Date column to datetime
+df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%y-%b')
+
+# Define the query_dataframe function
+def query_dataframe(parameters: dict):
+    # Extract parameters
+    liquidity_variable = parameters.get('liquidity_variable')
+    time_to_maturity = parameters.get('time_to_maturity')
+    region = parameters.get('region')
+    fi_nonfi = parameters.get('fi_nonfi')
+    ig_nonig = parameters.get('ig_nonig')
+
+    # Map time_to_maturity to the correct bucket
+    ttm_mapping = {
+        "less than 1 year": "< 1 year",
+        "under 1 year": "< 1 year",
+        "< 1 year": "< 1 year",
+        "1 year": "< 1 year",
+        "between 1 and 5 years": "1 - 5 years",
+        "1 - 5 years": "1 - 5 years",
+        "1 to 5 years": "1 - 5 years",
+        "2 years": "1 - 5 years",
+        "3 years": "1 - 5 years",
+        "4 years": "1 - 5 years",
+        "5 years": "1 - 5 years",
+        "more than 5 years": "> 5 years",
+        "> 5 years": "> 5 years",
+        "over 5 years": "> 5 years",
+        "6 years": "> 5 years",
+    }
+    if time_to_maturity:
+        time_to_maturity = ttm_mapping.get(time_to_maturity.lower(), time_to_maturity)
+
+    # Apply filters based on parameters
+    query_df = df_liquidity.copy()
+
+    # Apply Liquidity Variable filter
+    if liquidity_variable:
+        query_df = query_df[query_df['Liquidity Variable'].str.lower() == liquidity_variable.lower()]
+
+    # Apply Time to Maturity filter
+    if time_to_maturity:
+        query_df = query_df[query_df['Time to Maturity'] == time_to_maturity]
+
+    # Apply Region filter
+    if region:
+        query_df = query_df[query_df['Region'].str.upper() == region.upper()]
+
+    # For certain Liquidity Variables, FI_NonFI and IG_NonIG are ignored
+    special_liquidity_variables = [
+        'uk government bonds', 'german government bonds', 'france government bonds',
+        'au government bonds', 'jp government bonds', 'hk government bonds',
+        'sg government bonds', 'canadian provinces - british columbia',
+        'canadian provinces - ontario', 'canadian provinces - alberta',
+        'canadian provinces - quebec'
+    ]
+    if liquidity_variable and liquidity_variable.lower() not in special_liquidity_variables:
+        if fi_nonfi:
+            query_df = query_df[query_df['FI_NonFI'] == fi_nonfi]
+        if ig_nonig:
+            query_df = query_df[query_df['IG_NonIG'] == ig_nonig]
+
+    if query_df.empty:
+        return "No data found for the given parameters."
+
+    # Return the result as a dict
+    return query_df.to_dict('records')
+
+# Define the visualize_fx_rates function
+def visualize_fx_rates(parameters: dict):
+    """
+    Visualize FX Rates data based on user parameters.
+
+    Expected parameters:
+    - currencies: list of currency codes or names
+    - start_date: start date as string (e.g., '2024-01')
+    - end_date: end date as string (e.g., '2024-08')
+    - comparison_type: 'difference', 'percentage difference', etc.
+    - chart_type: 'line', 'bar', etc.
+    """
+    currencies = parameters.get('currencies')
+    start_period = parameters.get('start_period')
+    end_period = parameters.get('end_period')
+    comparison_type = parameters.get('comparison_type', 'difference')
+    chart_type = parameters.get('chart_type', 'line')
+
+    # Validate and preprocess inputs
+    if not currencies or not start_period or not end_period:
+        return "Missing required parameters."
+
+    # Convert periods to datetime
+    try:
+        start_date = pd.to_datetime(start_period, format='%B')
+        end_date = pd.to_datetime(end_period, format='%B')
+    except Exception:
+        return "Invalid date format. Please provide month names like 'January', 'February', etc."
+
+    # Filter data for the given currencies and date range
+    df_filtered = df_fx_rates_melted[
+        df_fx_rates_melted['Name'].str.contains('|'.join(currencies), case=False)
+    ]
+
+    # Pivot data for easier plotting
+    df_pivot = df_filtered.pivot_table(
+        index='Date', columns='Name', values='FX Rate'
+    ).reset_index()
+
+    # Filter dates
+    df_pivot = df_pivot[(df_pivot['Date'].dt.month >= start_date.month) & (df_pivot['Date'].dt.month <= end_date.month)]
+
+    if df_pivot.empty:
+        return "No data available for the given parameters."
+
+    # Perform comparison
+    if comparison_type == 'difference':
+        df_diff = df_pivot.iloc[-1, 1:] - df_pivot.iloc[0, 1:]
+        title = f"Difference in FX Rates between {start_period} and {end_period}"
+    elif comparison_type == 'percentage difference':
+        df_diff = ((df_pivot.iloc[-1, 1:] - df_pivot.iloc[0, 1:]) / df_pivot.iloc[0, 1:]) * 100
+        title = f"Percentage Difference in FX Rates between {start_period} and {end_period}"
+    else:
+        return "Invalid comparison type."
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    if chart_type == 'bar':
+        df_diff.plot(kind='bar')
+    else:
+        df_diff.plot()
+
+    plt.title(title)
+    plt.ylabel('FX Rate')
+    plt.xlabel('Currency')
+
+    # Highlight the currency with the highest difference
+    max_currency = df_diff.idxmax()
+    max_value = df_diff.max()
+    plt.annotate(f'Highest: {max_currency}', xy=(max_currency, max_value), xytext=(0, 10),
+                 textcoords='offset points', ha='center', va='bottom', fontsize=12, color='red')
+
+    # Save the plot to a buffer
+    buf = BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+
+    # Display the plot in Streamlit
+    st.image(buf)
+
+    # Allow user to download the filtered data
+    csv = df_filtered.to_csv(index=False)
+    st.download_button(
+        label="Download data as CSV",
+        data=csv,
+        file_name='FX_Rates_filtered.csv',
+        mime='text/csv',
+    )
+
+    return "Here is the visualization as per your request."
+
+# Define the retrieve_documents function
+def retrieve_documents(query):
+    # Use the hybrid_chain to retrieve documents
+    result = hybrid_chain.invoke({"query": query})['result']
+    return result
+
+# Define the tools
+tools = [
+    StructuredTool.from_function(
+        func=query_dataframe,
+        name="query_dataframe",
+        description="Queries the liquidity DataFrame based on parameters.",
+    ),
+    StructuredTool.from_function(
+        func=visualize_fx_rates,
+        name="visualize_fx_rates",
+        description="Visualizes FX Rates data based on user parameters.",
+    ),
+    StructuredTool.from_function(
+        func=retrieve_documents,
+        name="retrieve_documents",
+        description="Retrieves relevant documents from the corpus.",
+    )
+]
+
+# Initialize memory
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+# Initialize the agent with the system prompt
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=True,
+    memory=memory,
+    agent_kwargs={"system_message": SystemMessage(content=system_prompt)}
+)
+
+# Streamlit app
+def main():
+    st.set_page_config(page_title="Corporate Treasury Chatbot", layout="wide")
+    st.title("💼 Corporate Treasury Chatbot")
+
+    # Initialize session state
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+
+    if 'feedback' not in st.session_state:
+        st.session_state.feedback = []
+
+    # Display the conversation history
+    for idx, message in enumerate(st.session_state.messages):
+        if message['role'] == 'user':
+            with st.chat_message("user"):
+                st.markdown(message['content'])
+        elif message['role'] == 'assistant':
+            with st.chat_message("assistant"):
+                st.markdown(message['content'])
+
+                # Feedback buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button('👍', key=f'up_{idx}'):
+                        st.session_state.feedback.append({'message_index': idx, 'feedback': 'up'})
+                        st.success("Feedback recorded: 👍")
+                with col2:
+                    if st.button('👎', key=f'down_{idx}'):
+                        st.session_state.feedback.append({'message_index': idx, 'feedback': 'down'})
+                        st.error("Feedback recorded: 👎")
+
+    # User input at the bottom
+    if user_input := st.chat_input("Type your message here..."):
+        # Append user's message
+        st.session_state.messages.append({"role": "user", "content": user_input})
+
+        # Create a container for assistant's response
+        with st.chat_message("assistant"):
+            # Stream the LLM's response
+            st_callback = StreamlitCallbackHandler(st.container())
+
+            # Create a CallbackManager
+            callback_manager = CallbackManager([st_callback])
+
+            # Run the agent with streaming
+            try:
+                agent_response = agent.run(
+                    input=user_input,
+                    callbacks=[callback_manager]
+                )
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                agent_response = "I'm sorry, I encountered an error."
+
+            # Append assistant's response
+            st.session_state.messages.append({"role": "assistant", "content": agent_response})
+
+            # Feedback buttons
+            idx = len(st.session_state.messages) - 1
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button('👍', key=f'up_{idx}'):
+                    st.session_state.feedback.append({'message_index': idx, 'feedback': 'up'})
+                    st.success("Feedback recorded: 👍")
+            with col2:
+                if st.button('👎', key=f'down_{idx}'):
+                    st.session_state.feedback.append({'message_index': idx, 'feedback': 'down'})
+                    st.error("Feedback recorded: 👎")
+
+if __name__ == '__main__':
+    main()
+
+1. Loading and Preprocessing FX Rates Data
+Loading Data: We load FX_Rates.csv into a DataFrame df_fx_rates.
+Preprocessing:
+Melting Data: Use pd.melt to transform date columns into a single 'Date' column.
+Converting Dates: Parse the 'Date' column into datetime objects for easier filtering.
+2. Defining the visualize_fx_rates Function
+Purpose: Handles FX Rate-related queries, generates visualizations, and allows data download.
+Parameters:
+currencies: List of currencies or country names to filter.
+start_period and end_period: Months to define the date range.
+comparison_type: Type of comparison ('difference' or 'percentage difference').
+chart_type: Type of chart to display ('line' or 'bar').
+Functionality:
+Data Filtering: Filters data based on the provided currencies and date range.
+Pivoting Data: Pivots the data for easier plotting.
+Calculations: Computes the difference or percentage difference between the start and end periods.
+Visualization: Plots the data using Matplotlib and displays it in Streamlit.
+Data Download: Provides a download button for the filtered data.
+3. Updating the System Prompt
+Instruction: The LLM is guided to determine the type of question and decide which function to call.
+Handling Missing Parameters: The LLM is instructed to ask the user for any missing information needed to execute a function.
+4. Updating the Agent Initialization
+Adding New Tool: The visualize_fx_rates function is added to the list of tools that the agent can call.
+Agent Configuration: The agent is configured with the updated system_prompt and tools.
+5. Streamlit App Enhancements
+Display of Visualizations: The visualize_fx_rates function displays plots directly in the Streamlit app.
+Data Download: Users can download the CSV data used in the visualization.
+Input Handling: The app continues to handle user inputs and display assistant responses, with feedback mechanisms in place.
