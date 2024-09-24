@@ -1,0 +1,261 @@
+# app.py
+
+import os
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+from langchain.chat_models import ChatOpenAI
+from langchain.agents import initialize_agent, AgentType
+from langchain.memory import ConversationBufferMemory
+from langchain.callbacks import StreamlitCallbackHandler
+from langchain.callbacks.base import CallbackManager
+from langchain.tools import StructuredTool
+from langchain.schema import SystemMessage
+
+# Initialize session state variables
+if 'messages' not in st.session_state:
+    st.session_state['messages'] = []
+
+if 'feedback' not in st.session_state:
+    st.session_state['feedback'] = []
+
+# Initialize the LLM with streaming and system prompt
+openai_api_key = os.environ.get("OPENAI_API_KEY")  # Replace with your method
+llm = ChatOpenAI(
+    model_name="gpt-4-0613",  # Ensure function calling support
+    temperature=0,
+    openai_api_base=os.environ.get("gw_base_url"),
+    openai_api_key=openai_api_key,
+    streaming=True,
+)
+
+# System prompt to guide the LLM
+system_prompt = """
+You are a helpful assistant for the corporate treasury department.
+
+When a user asks a question, determine the type of question:
+
+1. If the question is about 'haircut' (contains the keyword 'haircut'), collect necessary parameters and call the 'query_dataframe' function to get data.
+
+2. If the question is about FX Rates (e.g., involves currencies, exchange rates, dates), collect necessary parameters and call the 'visualize_fx_rates' function to generate the requested visualization.
+
+3. For other questions, use the 'retrieve_documents' function to search the corpus for relevant information, and provide an informative answer.
+
+Always ensure that you are polite and helpful. If any parameters are missing for a function, ask the user for the missing information.
+"""
+
+# Load your DataFrames
+# Liquidity Data
+df_liquidity = pd.read_csv('liquidity_data.csv')  # Replace with your actual CSV file path
+df_liquidity['Liquidity Variable'] = df_liquidity['Liquidity Variable'].str.lower()
+
+# FX Rates Data
+df_fx_rates = pd.read_csv('FX_Rates.csv')  # Replace with your actual CSV file path
+
+# Preprocess FX Rates Data
+# Melt the DataFrame to have dates in a single column
+date_columns = [col for col in df_fx_rates.columns if '-' in col]
+df_fx_rates_melted = df_fx_rates.melt(id_vars=['Currency', 'Name'], value_vars=date_columns,
+                                      var_name='Date', value_name='FX Rate')
+
+# Convert Date column to datetime
+df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%y-%b')
+
+# Define the query_dataframe function
+def query_dataframe(parameters: dict):
+    # [Implementation as before]
+    pass
+
+# Define the visualize_fx_rates function
+def visualize_fx_rates(parameters: dict):
+    # [Implementation as before]
+    pass
+
+# Define the retrieve_documents function
+def retrieve_documents(query):
+    # [Implementation as before]
+    pass
+
+# Define the tools
+tools = [
+    StructuredTool.from_function(
+        func=query_dataframe,
+        name="query_dataframe",
+        description="Queries the liquidity DataFrame based on parameters.",
+    ),
+    StructuredTool.from_function(
+        func=visualize_fx_rates,
+        name="visualize_fx_rates",
+        description="Visualizes FX Rates data based on user parameters.",
+    ),
+    StructuredTool.from_function(
+        func=retrieve_documents,
+        name="retrieve_documents",
+        description="Retrieves relevant documents from the corpus.",
+    )
+]
+
+# Initialize memory
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+# Initialize the agent with the system prompt
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=True,
+    memory=memory,
+    agent_kwargs={"system_message": SystemMessage(content=system_prompt)}
+)
+
+# Streamlit app
+def main():
+    st.set_page_config(page_title="Corporate Treasury Chatbot", layout="wide")
+
+    # Apply custom CSS styles
+    st.markdown(
+        """
+        <style>
+        /* Main page styling */
+        .main {
+            background-color: #f0f2f6;
+        }
+        /* Chat message styling */
+        .user-message, .assistant-message {
+            padding: 10px;
+            border-radius: 10px;
+            margin: 10px 0;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #dcf8c6;
+            align-self: flex-end;
+        }
+        .assistant-message {
+            background-color: #ffffff;
+            align-self: flex-start;
+        }
+        /* Message container */
+        .message-container {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background-color: #c1c1c1;
+            border-radius: 4px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.title("💼 Corporate Treasury Chatbot")
+
+    # Sidebar with navigation and branding
+    with st.sidebar:
+        st.image("your_logo.png", use_column_width=True)  # Replace with your logo
+        st.markdown("### Navigation")
+        st.markdown("- Home")
+        st.markdown("- Settings")
+        st.markdown("- Help")
+        st.markdown("---")
+        st.markdown("**Version:** 1.0.0")
+
+    # Conversation container
+    st.markdown("<div class='message-container'>", unsafe_allow_html=True)
+    for idx, message in enumerate(st.session_state['messages']):
+        if message['role'] == 'user':
+            st.markdown(
+                f"<div class='user-message'><strong>You:</strong><br>{message['content']}</div>",
+                unsafe_allow_html=True
+            )
+        elif message['role'] == 'assistant':
+            st.markdown(
+                f"<div class='assistant-message'><strong>Assistant:</strong><br>{message['content']}</div>",
+                unsafe_allow_html=True
+            )
+
+            # Feedback buttons
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button('👍', key=f'up_{idx}'):
+                    st.session_state['feedback'].append({'message_index': idx, 'feedback': 'up'})
+                    st.success("Feedback recorded: 👍")
+            with col2:
+                if st.button('👎', key=f'down_{idx}'):
+                    st.session_state['feedback'].append({'message_index': idx, 'feedback': 'down'})
+                    st.error("Feedback recorded: 👎")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # User input at the bottom
+    st.markdown("---")
+    user_input = st.text_input("Type your message here...", key="user_input")
+    if st.button("Send", key="send_button"):
+        if user_input:
+            # Append user's message
+            st.session_state['messages'].append({"role": "user", "content": user_input})
+
+            # Create a container for assistant's response
+            with st.spinner("Assistant is typing..."):
+                # Stream the LLM's response
+                st_callback = StreamlitCallbackHandler(st.empty())
+
+                # Create a CallbackManager
+                callback_manager = CallbackManager([st_callback])
+
+                # Run the agent with streaming
+                try:
+                    agent_response = agent.run(
+                        input=user_input,
+                        callbacks=[callback_manager]
+                    )
+                except Exception as e:
+                    st.error(f"An error occurred: {str(e)}")
+                    agent_response = "I'm sorry, I encountered an error."
+
+                # Append assistant's response
+                st.session_state['messages'].append({"role": "assistant", "content": agent_response})
+
+            # Clear the input box after sending
+            st.session_state['user_input'] = ''
+
+if __name__ == '__main__':
+    main()
+
+Session State Initialization: Moved the initialization of st.session_state['messages'] and st.session_state['feedback'] to the top of the script, ensuring they're available before any access.
+
+Custom CSS Styling: Applied custom CSS to enhance the appearance of the chat interface, including background colors, message bubbles, and scrollbar styling.
+
+Sidebar with Branding:
+
+Added a sidebar containing a logo (replace "your_logo.png" with the path to your logo).
+Included navigation links and version information.
+Message Display:
+
+Replaced st.chat_message with custom HTML and CSS for broader compatibility and better control over styling.
+Displayed messages in styled message bubbles, differentiating between user and assistant messages.
+User Input Handling:
+
+Used st.text_input for the user input field.
+Added a "Send" button to submit messages.
+Cleared the input box after sending a message.
+Assistant Response:
+
+Displayed a spinner while the assistant is typing.
+Used st.empty() for streaming the assistant's response.
+Ensured that the assistant's response is appended to the conversation history.
+Feedback Mechanism:
+
+Placed feedback buttons (👍 and 👎) below each assistant message.
+Recorded feedback in st.session_state['feedback'].
+Code Organization:
+
+Ensured that all code accessing st.session_state variables is placed after their initialization.
+Used consistent naming and formatting throughout the script.
+
