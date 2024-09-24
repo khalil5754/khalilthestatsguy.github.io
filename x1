@@ -1,0 +1,221 @@
+# app.py
+
+import os
+import streamlit as st
+import pandas as pd
+from langchain.chat_models import ChatOpenAI
+from langchain.agents import initialize_agent, AgentType
+from langchain.memory import ConversationBufferMemory
+from langchain.callbacks import StreamlitCallbackHandler
+from langchain.callbacks.base import CallbackManager
+from langchain.tools import StructuredTool
+from langchain.schema import SystemMessage
+from langchain.prompts.chat import ChatPromptTemplate
+
+# Replace token_fetcher.get_token() with your token fetching method
+# For example:
+# token_fetcher = YourTokenFetcherClass()
+# openai_api_key = token_fetcher.get_token()
+openai_api_key = os.environ["OPENAI_API_KEY"]  # Replace with your method
+
+# Initialize the LLM with streaming and system prompt
+llm = ChatOpenAI(
+    model_name="gpt-4-0613",  # Ensure function calling support
+    temperature=0,
+    openai_api_base=os.environ["gw_base_url"],
+    openai_api_key=openai_api_key,
+    streaming=True,
+    callbacks=[StreamlitCallbackHandler(st.container())],
+)
+
+# System prompt to guide the LLM
+system_prompt = """
+You are a helpful assistant for the corporate treasury department.
+
+When a user asks a question, determine if the question is about 'haircut' (contains the keyword 'haircut').
+
+- If it is a haircut question, you need to collect the necessary parameters to query the liquidity DataFrame using the 'query_dataframe' function.
+
+- If any parameters are missing, ask the user for the missing information.
+
+- Once you have all the necessary parameters, call the 'query_dataframe' function to get the data, and present the result to the user.
+
+- If it is not a haircut question, use the 'retrieve_documents' function to search the corpus for relevant information, and provide the user with an informative answer.
+
+Always ensure that you are polite and helpful.
+"""
+
+# Load your DataFrame
+df = pd.read_csv('liquidity_data.csv')  # Replace with your actual CSV file path
+df['Liquidity Variable'] = df['Liquidity Variable'].str.lower()
+
+# Define the query_dataframe function
+def query_dataframe(parameters: dict):
+    # Extract parameters
+    liquidity_variable = parameters.get('liquidity_variable')
+    time_to_maturity = parameters.get('time_to_maturity')
+    region = parameters.get('region')
+    fi_nonfi = parameters.get('fi_nonfi')
+    ig_nonig = parameters.get('ig_nonig')
+
+    # Map time_to_maturity to the correct bucket
+    ttm_mapping = {
+        "less than 1 year": "< 1 year",
+        "under 1 year": "< 1 year",
+        "< 1 year": "< 1 year",
+        "1 year": "< 1 year",
+        "between 1 and 5 years": "1 - 5 years",
+        "1 - 5 years": "1 - 5 years",
+        "1 to 5 years": "1 - 5 years",
+        "2 years": "1 - 5 years",
+        "3 years": "1 - 5 years",
+        "4 years": "1 - 5 years",
+        "5 years": "1 - 5 years",
+        "more than 5 years": "> 5 years",
+        "> 5 years": "> 5 years",
+        "over 5 years": "> 5 years",
+        "6 years": "> 5 years",
+    }
+    if time_to_maturity:
+        time_to_maturity = ttm_mapping.get(time_to_maturity.lower(), time_to_maturity)
+
+    # Apply filters based on parameters
+    query_df = df.copy()
+
+    # Apply Liquidity Variable filter
+    if liquidity_variable:
+        query_df = query_df[query_df['Liquidity Variable'].str.lower() == liquidity_variable.lower()]
+
+    # Apply Time to Maturity filter
+    if time_to_maturity:
+        query_df = query_df[query_df['Time to Maturity'] == time_to_maturity]
+
+    # Apply Region filter
+    if region:
+        query_df = query_df[query_df['Region'].str.upper() == region.upper()]
+
+    # For certain Liquidity Variables, FI_NonFI and IG_NonIG are ignored
+    special_liquidity_variables = [
+        'uk government bonds', 'german government bonds', 'france government bonds',
+        'au government bonds', 'jp government bonds', 'hk government bonds',
+        'sg government bonds', 'canadian provinces - british columbia',
+        'canadian provinces - ontario', 'canadian provinces - alberta',
+        'canadian provinces - quebec'
+    ]
+    if liquidity_variable and liquidity_variable.lower() not in special_liquidity_variables:
+        if fi_nonfi:
+            query_df = query_df[query_df['FI_NonFI'] == fi_nonfi]
+        if ig_nonig:
+            query_df = query_df[query_df['IG_NonIG'] == ig_nonig]
+
+    if query_df.empty:
+        return "No data found for the given parameters."
+
+    # Return the result as a dict
+    return query_df.to_dict('records')
+
+# Define the retrieve_documents function
+def retrieve_documents(query):
+    # Use the hybrid_chain to retrieve documents
+    result = hybrid_chain.invoke({"query": query})['result']
+    return result
+
+# Define the tools
+tools = [
+    StructuredTool.from_function(
+        func=query_dataframe,
+        name="query_dataframe",
+        description="Queries the liquidity DataFrame based on parameters.",
+    ),
+    StructuredTool.from_function(
+        func=retrieve_documents,
+        name="retrieve_documents",
+        description="Retrieves relevant documents from the corpus.",
+    )
+]
+
+# Initialize memory
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+# Initialize the agent with the system prompt
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=True,
+    memory=memory,
+    agent_kwargs={"system_message": SystemMessage(content=system_prompt)}
+)
+
+# Streamlit app
+def main():
+    st.set_page_config(page_title="Corporate Treasury Chatbot", layout="wide")
+    st.title("💼 Corporate Treasury Chatbot")
+
+    # Initialize session state
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+
+    if 'feedback' not in st.session_state:
+        st.session_state.feedback = []
+
+    # Display the conversation history
+    for idx, message in enumerate(st.session_state.messages):
+        if message['role'] == 'user':
+            with st.chat_message("user"):
+                st.markdown(message['content'])
+        elif message['role'] == 'assistant':
+            with st.chat_message("assistant"):
+                st.markdown(message['content'])
+
+                # Feedback buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button('👍', key=f'up_{idx}'):
+                        st.session_state.feedback.append({'message_index': idx, 'feedback': 'up'})
+                        st.success("Feedback recorded: 👍")
+                with col2:
+                    if st.button('👎', key=f'down_{idx}'):
+                        st.session_state.feedback.append({'message_index': idx, 'feedback': 'down'})
+                        st.error("Feedback recorded: 👎")
+
+    # User input at the bottom
+    if user_input := st.chat_input("Type your message here..."):
+        # Append user's message
+        st.session_state.messages.append({"role": "user", "content": user_input})
+
+        # Create a container for assistant's response
+        with st.chat_message("assistant"):
+            # Stream the LLM's response
+            st_callback = StreamlitCallbackHandler(st.container())
+
+            # Create a CallbackManager
+            callback_manager = CallbackManager([st_callback])
+
+            # Run the agent with streaming
+            try:
+                agent_response = agent.run(
+                    input=user_input,
+                    callbacks=[callback_manager]
+                )
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
+                agent_response = "I'm sorry, I encountered an error."
+
+            # Append assistant's response
+            st.session_state.messages.append({"role": "assistant", "content": agent_response})
+
+            # Feedback buttons
+            idx = len(st.session_state.messages) - 1
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button('👍', key=f'up_{idx}'):
+                    st.session_state.feedback.append({'message_index': idx, 'feedback': 'up'})
+                    st.success("Feedback recorded: 👍")
+            with col2:
+                if st.button('👎', key=f'down_{idx}'):
+                    st.session_state.feedback.append({'message_index': idx, 'feedback': 'down'})
+                    st.error("Feedback recorded: 👎")
+
+if __name__ == '__main__':
+    main()
