@@ -219,3 +219,33 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+
+Streamlit Interface Enhancements:
+
+Fixed Input Box: The input box is placed at the bottom using st.chat_input, ensuring it doesn't move.
+Message Display: Messages are displayed using st.chat_message, with the conversation history maintained in st.session_state.messages.
+Improved Layout: The app uses Streamlit's wide layout and better structuring for a robust interface.
+Feedback Mechanism:
+
+Thumbs Up/Down Buttons: After each assistant response, there are thumbs up (👍) and thumbs down (👎) buttons.
+Feedback Storage: Feedback is stored in st.session_state.feedback with the message index and feedback type, allowing you to analyze chatbot performance later.
+LLM Integration with LangChain:
+
+LLM Initialization: The LLM is initialized with streaming=True and a system_prompt to guide its behavior.
+Agent Setup: The agent uses AgentType.OPENAI_FUNCTIONS to enable function calling, integrating the query_dataframe and retrieve_documents functions.
+Agentic RAG and Function Calling:
+
+System Prompt: The system prompt instructs the LLM to determine if a question is about "haircut" and act accordingly.
+Function Calling: The LLM decides when to call functions, collects necessary parameters, and handles missing information by asking the user.
+Hybrid Chain Invocation: For non-haircut questions, the agent uses retrieve_documents to fetch relevant information using your hybrid_chain.
+Edge Case Handling:
+
+DataFrame Query Logic: The query_dataframe function includes logic for handling special Liquidity Variables, time to maturity buckets, and parameter mapping.
+Error Handling: The app includes try-except blocks to catch and display errors gracefully.
+Bug Fixes and Improvements:
+
+Unique Keys for Buttons: Buttons have unique keys (key=f'up_{idx}') to prevent conflicts.
+Session State Management: Ensures that conversation history and feedback are maintained across interactions.
+Function Signatures: Functions are defined with clear parameters and return types for proper integration with the agent.
