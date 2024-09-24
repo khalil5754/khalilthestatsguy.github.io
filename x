@@ -1,45 +1,125 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import openai
 import os
 
+# Load data
+data = {
+    'Liquidity Variable': ['jp government bonds', 'government bonds - other', 'canadian provinces - ontario'],
+    'Time to Maturity': ['< 1 year', '1 - 5 years', '> 5 years'],
+    'Region': ['APAC', 'EUROPE', 'CANADA'],
+    'FI_NonFI': [None, 'FI', None],
+    'IG_NonIG': [None, 'IG', None],
+    'Haircut Value': [0.05, 0.1, 0.08]
+}
 df = pd.DataFrame(data)
 df['Liquidity Variable'] = df['Liquidity Variable'].str.lower()
 
-# Initialize session state for conversation
+# Initialize session state for conversation and feedback
 if 'conversation_history' not in st.session_state:
-    st.session_state.conversation_history = []
+    st.session_state['conversation_history'] = []
+if 'feedback' not in st.session_state:
+    st.session_state['feedback'] = []
 
-def main():
-    st.title("💼 Corporate Treasury Chatbot")
+# Custom CSS to fix the text box at the bottom and improve styling
+st.markdown("""
+    <style>
+    /* General styling */
+    body {
+        background-color: #f0f2f6;
+    }
+    /* Chat container */
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: 70vh;
+        overflow-y: auto;
+        padding: 10px;
+        background-color: #ffffff;
+        border-radius: 10px;
+    }
+    /* Message styling */
+    .message {
+        padding: 10px;
+        border-radius: 10px;
+        margin-bottom: 10px;
+        max-width: 80%;
+        word-wrap: break-word;
+    }
+    .user-message {
+        background-color: #dcf8c6;
+        align-self: flex-end;
+    }
+    .assistant-message {
+        background-color: #f1f0f0;
+        align-self: flex-start;
+    }
+    /* Input container */
+    .input-container {
+        position: fixed;
+        bottom: 0;
+        width: 100%;
+        padding: 10px;
+        background-color: #f0f2f6;
+    }
+    /* Feedback buttons */
+    .feedback-buttons {
+        display: flex;
+        gap: 10px;
+        margin-top: -10px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    # Display conversation history
-    for message in st.session_state.conversation_history:
+st.title("💼 Corporate Treasury Chatbot")
+
+# Chat container
+chat_container = st.container()
+with chat_container:
+    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    for idx, message in enumerate(st.session_state['conversation_history']):
         if message['role'] == 'user':
-            st.markdown(f"**You:** {message['content']}")
+            st.markdown(
+                f'<div class="message user-message"><strong>You:</strong> {message["content"]}</div>',
+                unsafe_allow_html=True
+            )
         else:
-            st.markdown(f"**Assistant:** {message['content']}")
+            st.markdown(
+                f'<div class="message assistant-message"><strong>Assistant:</strong> {message["content"]}</div>',
+                unsafe_allow_html=True
+            )
+            # Feedback buttons
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                if st.button('👍', key=f'up_{idx}'):
+                    st.session_state['feedback'].append({'message_index': idx, 'feedback': 'up'})
+                    st.success("Feedback recorded: 👍")
+            with col2:
+                if st.button('👎', key=f'down_{idx}'):
+                    st.session_state['feedback'].append({'message_index': idx, 'feedback': 'down'})
+                    st.error("Feedback recorded: 👎")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # User input
-    user_input = st.text_input("Ask a question about treasury operations...")
+# User input at the bottom
+st.markdown('<div class="input-container">', unsafe_allow_html=True)
+user_input = st.text_input("Type your message here...", key="user_input")
+st.markdown('</div>', unsafe_allow_html=True)
 
-    if user_input:
-        # Append user message to conversation history
-        st.session_state.conversation_history.append({"role": "user", "content": user_input})
+if user_input:
+    # Append user message to conversation history
+    st.session_state['conversation_history'].append({"role": "user", "content": user_input})
 
-        # Process the input and get assistant's response
-        assistant_response = process_user_input(user_input)
+    # Process the input and get assistant's response
+    assistant_response = process_user_input(user_input)
 
-        # Append assistant's response to conversation history
-        st.session_state.conversation_history.append({"role": "assistant", "content": assistant_response})
+    # Append assistant's response to conversation history
+    st.session_state['conversation_history'].append({"role": "assistant", "content": assistant_response})
 
-        # Display the assistant's response
-        st.markdown(f"**Assistant:** {assistant_response}")
+    # Clear the input box
+    st.session_state['user_input'] = ''
 
 def process_user_input(user_input):
-    conversation = st.session_state.conversation_history
+    conversation = st.session_state['conversation_history']
 
     # Attempt to extract information from the entire conversation
     extracted_info = extract_information_from_conversation(conversation)
@@ -57,6 +137,14 @@ def process_user_input(user_input):
         if result.empty:
             return "I'm sorry, I couldn't find any data matching your query."
         else:
+            # Allow user to download the result as CSV
+            csv = result.to_csv(index=False)
+            st.download_button(
+                label="Download data as CSV",
+                data=csv,
+                file_name='query_results.csv',
+                mime='text/csv',
+            )
             # Display the result as a table
             st.table(result)
             return "Here are the results based on your query."
@@ -237,5 +325,3 @@ def query_dataframe(extracted_info):
 
     return query_df
 
-if __name__ == "__main__":
-    main()
