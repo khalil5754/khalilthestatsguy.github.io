@@ -1,43 +1,188 @@
-# Initialize embeddings with batching and increased timeout
-embeddings = OpenAIEmbeddings(
-    openai_api_key=openai_api_key,
-    batch_size=64,
-    request_timeout=600
-)
+system_prompt = """
+You are a helpful assistant for the corporate treasury department.
 
-# Function to process documents and compute embeddings in parallel
-def process_chunk_size(chunk_size):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=50)
-    docs = text_splitter.split_documents(documents)
+When a user asks a question, determine the type of question:
 
-    # Add metadata
-    for idx, doc in enumerate(docs):
-        doc.metadata['doc_id'] = doc.metadata.get('source', 'unknown')
-        doc.metadata['chunk_id'] = idx
-        doc.metadata['chunk_size'] = chunk_size
+1. If the question is about 'haircut' (the user wants to know the haircut value of an asset), collect the necessary parameters and call the 'query_dataframe' function to get data. The 'liquidity_variable' parameter refers to the type of asset (e.g., 'jp government bonds' for Japanese government bonds).
 
-    # Compute embeddings in batches
-    batch_size = 64
-    texts = [doc.page_content for doc in docs]
-    embeddings_list = []
+2. If the question is about FX Rates (e.g., involves currencies, exchange rates, dates), collect necessary parameters and call the 'visualize_fx_rates' function to generate the requested visualization.
 
-    # Compute embeddings in batches
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i:i + batch_size]
-        embeddings_batch = embeddings.embed_documents(batch_texts)
-        embeddings_list.extend(embeddings_batch)
+3. For other questions, use the 'retrieve_documents' function to search the corpus for relevant information, and provide an informative answer.
 
-    # Create vector store and persist it
-    vectorstore = Chroma(collection_name=f'docs_{chunk_size}', persist_directory=f'./chroma_{chunk_size}')
-    vectorstore.add_embeddings(embeddings_list, docs)
-    vectorstore.persist()
+Always ensure that you are polite and helpful. If any parameters are missing for a function, ask the user for the missing information.
 
-    return chunk_size, vectorstore
+Examples:
 
-# Process each chunk size
-chunk_sizes = [1024, 512]  # Reduced number of chunk sizes
-vectorstores = {}
+- User asks: "What is the haircut on a Japanese government bond with a time-to-maturity of 2 years in the APAC region?"
+  - You should extract:
+    - liquidity_variable: 'jp government bonds'
+    - time_to_maturity: '2 years'
+    - region: 'APAC'
+    - Call 'query_dataframe' with these parameters.
 
-for chunk_size in chunk_sizes:
-    chunk_size, vectorstore = process_chunk_size(chunk_size)
-    vectorstores[chunk_size] = vectorstore
+- User asks: "Show me a bar graph with the percentage difference in FX Rates between August and January for the US Dollar and Euro."
+  - You should extract:
+    - currencies: ['US Dollar', 'Euro']
+    - start_period: 'January'
+    - end_period: 'August'
+    - comparison_type: 'percentage difference'
+    - chart_type: 'bar'
+    - Call 'visualize_fx_rates' with these parameters.
+"""
+tools = [
+    StructuredTool.from_function(
+        func=query_dataframe,
+        name="query_dataframe",
+        description=(
+            "Queries the liquidity DataFrame based on parameters. "
+            "Expected liquidity_variable values include 'jp government bonds' for Japanese government bonds, "
+            "'uk government bonds' for UK government bonds, etc."
+        ),
+    ),
+    # Other tools...
+]
+
+def query_dataframe(input: QueryDataFrameInput) -> str:
+    # Mapping from user inputs to DataFrame values
+    liquidity_variable_mapping = {
+        'japanese government bonds': 'jp government bonds',
+        'uk government bonds': 'uk government bonds',
+        # Add other mappings as needed
+    }
+    
+    # Extract parameters
+    liquidity_variable = input.liquidity_variable.lower()
+    time_to_maturity = input.time_to_maturity
+    region = input.region
+    fi_nonfi = input.fi_nonfi
+    ig_nonig = input.ig_nonig
+
+    # Map liquidity_variable to DataFrame value
+    liquidity_variable = liquidity_variable_mapping.get(liquidity_variable, liquidity_variable)
+    
+    # Rest of the function logic...
+
+
+def get_relevant_documents(self, query: str) -> List[Document]:
+    # First request: get initial top K results from the smallest chunk size
+    vectorstore = self.vectorstores[self.initial_chunk_size]
+    docs_and_scores = vectorstore.similarity_search_with_score(query, k=self.top_k)
+
+    augmented_docs = []
+
+    for doc, score in docs_and_scores:
+        doc_id = doc.metadata['doc_id']
+        chunk_id = doc.metadata['chunk_id']
+
+        # Determine the augment chunk size
+        if self.target_fragment_size >= 1024 and 1024 in self.vectorstores:
+            augment_chunk_size = 1024
+        elif self.target_fragment_size >= 512 and 512 in self.vectorstores:
+            augment_chunk_size = 512
+        else:
+            augment_chunk_size = self.initial_chunk_size
+
+        augment_vectorstore = self.vectorstores[augment_chunk_size]
+
+        # Create a dictionary filter
+        where_filter = {"doc_id": doc_id}
+
+        # Retrieve adjacent chunks to match target fragment size
+        augment_docs = augment_vectorstore.similarity_search(
+            query, k=self.top_k, filter=where_filter
+        )
+
+        # Combine chunks to match target fragment size
+        combined_text = ''.join([d.page_content for d in augment_docs])
+        augmented_doc = Document(page_content=combined_text, metadata={'doc_id': doc_id})
+        augmented_docs.append(augmented_doc)
+
+    return augmented_docs
+
+
+def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
+    # Extract parameters
+    currencies = input.currencies
+    start_period = input.start_period
+    end_period = input.end_period
+    comparison_type = input.comparison_type
+    chart_type = input.chart_type
+
+    # Validate and preprocess inputs
+    if not currencies or not start_period or not end_period:
+        return "Missing required parameters."
+
+    # Convert periods to datetime
+    try:
+        start_date = pd.to_datetime(start_period, format='%B')
+        end_date = pd.to_datetime(end_period, format='%B')
+    except Exception:
+        return "Invalid date format. Please provide month names like 'January', 'February', etc."
+
+    # Filter data for the given currencies
+    df_filtered = df_fx_rates_melted[
+        df_fx_rates_melted['Name'].str.contains('|'.join(currencies), case=False)
+    ]
+
+    # Filter dates
+    df_filtered = df_filtered[
+        (df_filtered['Date'].dt.month >= start_date.month) & (df_filtered['Date'].dt.month <= end_date.month)
+    ]
+
+    if df_filtered.empty:
+        return "No data available for the given parameters."
+
+    # Pivot data for easier calculation
+    df_pivot = df_filtered.pivot_table(
+        index='Date', columns='Name', values='FX Rate'
+    )
+
+    # Ensure data types are numeric
+    df_pivot = df_pivot.apply(pd.to_numeric, errors='coerce')
+
+    # Drop columns with all NaN values
+    df_pivot.dropna(axis=1, how='all', inplace=True)
+
+    if df_pivot.empty:
+        return "No valid FX Rate data available after processing."
+
+    # Perform comparison
+    if comparison_type == 'difference':
+        df_diff = df_pivot.iloc[-1] - df_pivot.iloc[0]
+        title = f"Difference in FX Rates between {start_period} and {end_period}"
+    elif comparison_type == 'percentage difference':
+        df_diff = ((df_pivot.iloc[-1] - df_pivot.iloc[0]) / df_pivot.iloc[0]) * 100
+        title = f"Percentage Difference in FX Rates between {start_period} and {end_period}"
+    else:
+        return "Invalid comparison type."
+
+    # Drop NaN values from df_diff
+    df_diff.dropna(inplace=True)
+
+    if df_diff.empty:
+        return "No data available for the selected currencies after calculating differences."
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    if chart_type == 'bar':
+        df_diff.plot(kind='bar')
+    else:
+        df_diff.plot()
+
+    plt.title(title)
+    plt.ylabel('Percentage Difference (%)' if comparison_type == 'percentage difference' else 'FX Rate Difference')
+    plt.xlabel('Currency')
+
+    # Highlight the currency with the highest difference
+    max_currency = df_diff.idxmax()
+    max_value = df_diff.max()
+    plt.annotate(f'Highest: {max_currency}', xy=(max_currency, max_value), xytext=(0, 10),
+                 textcoords='offset points', ha='center', va='bottom', fontsize=12, color='red')
+
+    # Display the plot
+    plt.show()
+
+    # Display the filtered data
+    display(df_filtered)
+
+    return "Here is the visualization as per your request."
