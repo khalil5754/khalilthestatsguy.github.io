@@ -12,6 +12,7 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     import matplotlib.dates as mdates
     import numpy as np
     from sklearn.linear_model import LinearRegression
+    import matplotlib.cm as cm
 
     # Extract parameters
     currency_codes = input.currency_codes
@@ -44,6 +45,8 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     # Convert 'Date' column to datetime if not already
     if not pd.api.types.is_datetime64_any_dtype(df_fx_rates_melted['Date']):
         df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], errors='coerce')
+        # Check for NaT values and drop them
+        df_fx_rates_melted.dropna(subset=['Date'], inplace=True)
 
     # Ensure 'Currency' codes are uppercase
     df_fx_rates_melted['Currency'] = df_fx_rates_melted['Currency'].str.upper()
@@ -80,66 +83,7 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
         return "No valid FX Rate data available after processing."
 
     # Plotting
-    plt.figure(figsize=(12, 6))
-
-    if chart_type == 'bar':
-        if comparison_type == 'difference':
-            df_diff = df_pivot.iloc[-1] - df_pivot.iloc[0]
-            title = f"Difference in FX Rates between {start_period} and {end_period}"
-        elif comparison_type == 'percentage difference':
-            df_diff = ((df_pivot.iloc[-1] - df_pivot.iloc[0]) / df_pivot.iloc[0]) * 100
-            title = f"Percentage Difference in FX Rates between {start_period} and {end_period}"
-        else:
-            return "Invalid comparison type. Please specify 'difference' or 'percentage difference'."
-
-        # Drop NaN values from df_diff
-        df_diff.dropna(inplace=True)
-
-        if df_diff.empty:
-            return "No data available after calculating differences."
-
-        # Refined Bar Plot
-        ax = df_diff.plot(kind='bar', color='steelblue', edgecolor='black', linewidth=1)
-
-        # Highlight the highest bar
-        max_currency = df_diff.idxmax()
-        max_value = df_diff.max()
-        bars = ax.patches
-        for bar in bars:
-            if bar.get_x() + bar.get_width() / 2 == bars[df_diff.index.get_loc(max_currency)].get_x() + bar.get_width() / 2:
-                bar.set_color('lightcoral')
-
-        # Annotate the highest value
-        plt.annotate(
-            f'Highest: {max_currency}',
-            xy=(bars[df_diff.index.get_loc(max_currency)].get_x() + bar.get_width() / 2, max_value),
-            xytext=(0, 5),
-            textcoords='offset points',
-            ha='center',
-            va='bottom',
-            fontsize=10,
-            fontweight='bold',
-            color='red'
-        )
-
-        # Add trend line if specified
-        if trend_line:
-            # For bar chart, fit a linear trend line
-            x_vals = np.arange(len(df_diff))
-            y_vals = df_diff.values
-            z = np.polyfit(x_vals, y_vals, 1)
-            p = np.poly1d(z)
-            plt.plot(x_vals, p(x_vals), linestyle='--', color='grey')
-
-        plt.title(title)
-        plt.ylabel('Percentage Difference (%)' if 'percentage' in comparison_type else 'FX Rate Difference')
-        plt.xlabel('Currency Code')
-
-        # Improve overall appearance
-        plt.grid(True, linestyle='--', alpha=0.5, axis='y')
-        plt.tight_layout()
-
-    elif chart_type == 'line':
+    if chart_type == 'line':
         # Calculate month-over-month percentage differences
         df_pct_change = df_pivot.pct_change().dropna() * 100
 
@@ -149,24 +93,27 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
         title = f"Month-over-Month Percentage Difference in FX Rates from {start_period} to {end_period}"
 
         # Plotting
-        ax = df_pct_change.plot(marker='o', linewidth=2)
+        fig, ax = plt.subplots(figsize=(12, 6))
+        df_pct_change.plot(ax=ax, marker='o', linewidth=2)
 
-        # Customize lines
-        for line in ax.get_lines():
-            line.set_color('steelblue')
+        # Remove the line color customization to let Matplotlib assign different colors
+        # for line in ax.get_lines():
+        #     line.set_color('steelblue')
 
         # Highlight the line with the highest cumulative change
         cumulative_changes = df_pct_change.sum()
         max_currency = cumulative_changes.idxmax()
         max_line = ax.get_lines()[df_pct_change.columns.get_loc(max_currency)]
-        max_line.set_color('lightcoral')
+        max_line.set_linewidth(3)
+        # Optionally change its color
+        # max_line.set_color('lightcoral')
 
         # Annotate the highest line
         max_value = df_pct_change[max_currency].max()
         max_date = df_pct_change[max_currency].idxmax()
-        plt.annotate(
+        ax.annotate(
             f'Highest: {max_currency}',
-            xy=(mdates.date2num(max_date), max_value),
+            xy=(max_date, max_value),
             xytext=(0, 10),
             textcoords='offset points',
             ha='center',
@@ -180,35 +127,41 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
         if trend_line:
             # For each currency, add a trend line
             for currency in df_pct_change.columns:
-                x_vals = mdates.date2num(df_pct_change.index)
+                x_dates = df_pct_change.index
+                x_vals = mdates.date2num(x_dates)
                 y_vals = df_pct_change[currency].values
                 model = LinearRegression()
                 model.fit(x_vals.reshape(-1, 1), y_vals)
                 trend = model.predict(x_vals.reshape(-1, 1))
-                plt.plot(df_pct_change.index, trend, linestyle='--', color='grey')
+                ax.plot(x_dates, trend, linestyle='--', color='grey')
 
-        plt.title(title)
-        plt.ylabel('Percentage Change (%)')
-        plt.xlabel('Date')
+        ax.set_title(title)
+        ax.set_ylabel('Percentage Change (%)')
+        ax.set_xlabel('Date')
 
         # Format x-axis dates
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
-        plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
         plt.xticks(rotation=45)
 
-        plt.legend(title='Currency Codes')
+        ax.legend(title='Currency Codes')
 
         # Improve overall appearance
-        plt.grid(True, linestyle='--', alpha=0.5)
+        ax.grid(True, linestyle='--', alpha=0.5)
         plt.tight_layout()
 
+        # Set x-axis limits to data range
+        ax.set_xlim(df_pct_change.index.min(), df_pct_change.index.max())
+
     else:
-        return "Invalid chart type. Please specify 'line' or 'bar'."
+        # Handle bar chart or other chart types if necessary
+        pass
 
     # Display the plot
     plt.show()
 
     return "Here is the visualization as per your request."
+
 
 
 
