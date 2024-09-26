@@ -87,7 +87,7 @@ def query_dataframe(input: QueryDataFrameInput) -> str:
     return f"Here are the results based on your query:\n\n{result_table}"
 
 
--------
+RETRIEVER -------
 Option 1 (multi-retriever):
 from langchain.chains import RetrievalQA
 from langchain.retrievers.multi_query import MultiQueryRetriever
@@ -169,3 +169,160 @@ def retrieve_documents(query: str) -> str:
     # Use the qa_chain to retrieve and answer the query
     result = qa_chain.run(query)
     return result
+
+-------------------------------
+def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+    import numpy as np
+    from sklearn.linear_model import LinearRegression
+    import matplotlib.cm as cm
+
+    # Extract parameters
+    currency_codes = input.currency_codes
+    start_period = input.start_period
+    end_period = input.end_period
+    comparison_type = input.comparison_type.lower()
+    chart_type = input.chart_type.lower()
+    trend_line = input.trend_line
+
+    # Validate inputs
+    if not currency_codes:
+        return "Missing required parameter: currency_codes."
+    
+    # Handle 'YTD' or missing periods
+    if start_period is None or end_period is None or 'ytd' in (start_period.lower(), end_period.lower()):
+        start_period = 'January'
+        end_period = 'August'
+
+    # Convert periods to datetime
+    try:
+        start_date = pd.to_datetime(f"2023 {start_period}", format='%Y %B')
+        end_date = pd.to_datetime(f"2023 {end_period}", format='%Y %B')
+    except Exception as e:
+        return f"Invalid date format: {e}"
+
+    # Ensure start_date is before end_date
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    # Ensure 'Date' column is correctly parsed
+    if not pd.api.types.is_datetime64_any_dtype(df_fx_rates_melted['Date']):
+        # Adjust the format string to match your data
+        df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%b-%y', errors='coerce')
+
+    # Check for NaT values and drop them
+    df_fx_rates_melted.dropna(subset=['Date'], inplace=True)
+
+    # Ensure 'Currency' codes are uppercase
+    df_fx_rates_melted['Currency'] = df_fx_rates_melted['Currency'].str.upper()
+    currency_codes = [code.upper() for code in currency_codes]
+
+    # Filter data for the given currency codes
+    df_filtered = df_fx_rates_melted[
+        df_fx_rates_melted['Currency'].isin(currency_codes)
+    ]
+
+    if df_filtered.empty:
+        return "No data available for the given currency codes."
+
+    # Filter dates
+    df_filtered = df_filtered[
+        (df_filtered['Date'] >= start_date) & (df_filtered['Date'] <= end_date)
+    ]
+
+    if df_filtered.empty:
+        return "No data available for the given date range."
+
+    # Pivot data for easier calculation
+    df_pivot = df_filtered.pivot_table(
+        index='Date', columns='Currency', values='FX Rate'
+    )
+
+    # Ensure data types are numeric
+    df_pivot = df_pivot.apply(pd.to_numeric, errors='coerce')
+
+    # Drop columns with all NaN values
+    df_pivot.dropna(axis=1, how='all', inplace=True)
+
+    if df_pivot.empty:
+        return "No valid FX Rate data available after processing."
+
+    # Plotting
+    plt.figure(figsize=(12, 6))
+
+    if chart_type == 'line':
+        # Calculate month-over-month percentage differences
+        df_pct_change = df_pivot.pct_change().dropna() * 100
+
+        if df_pct_change.empty:
+            return "No data available after calculating month-over-month percentage differences."
+
+        title = f"Month-over-Month Percentage Difference in FX Rates from {start_period} to {end_period}"
+
+        # Define a colormap
+        colormap = cm.get_cmap('tab10')  # You can choose any colormap you like
+
+        # Plotting
+        ax = df_pct_change.plot(marker='o', linewidth=2, colormap=colormap)
+
+        # Remove the line color customization to let Matplotlib assign different colors
+        # for line in ax.get_lines():
+        #     line.set_color('steelblue')
+
+        # Highlight the line with the highest cumulative change
+        cumulative_changes = df_pct_change.sum()
+        max_currency = cumulative_changes.idxmax()
+        max_line = ax.get_lines()[df_pct_change.columns.get_loc(max_currency)]
+        max_line.set_linewidth(3)  # Make the line thicker
+
+        # Annotate the highest line
+        max_value = df_pct_change[max_currency].max()
+        max_date = df_pct_change[max_currency].idxmax()
+        plt.annotate(
+            f'Highest: {max_currency}',
+            xy=(mdates.date2num(max_date), max_value),
+            xytext=(0, 10),
+            textcoords='offset points',
+            ha='center',
+            va='bottom',
+            fontsize=10,
+            fontweight='bold',
+            color='red'
+        )
+
+        # Add trend lines if specified
+        if trend_line:
+            # For each currency, add a trend line
+            for i, currency in enumerate(df_pct_change.columns):
+                x_vals = mdates.date2num(df_pct_change.index)
+                y_vals = df_pct_change[currency].values
+                model = LinearRegression()
+                model.fit(x_vals.reshape(-1, 1), y_vals)
+                trend = model.predict(x_vals.reshape(-1, 1))
+                plt.plot(df_pct_change.index, trend, linestyle='--', color='grey')
+
+        plt.title(title)
+        plt.ylabel('Percentage Change (%)')
+        plt.xlabel('Date')
+
+        # Format x-axis dates
+        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+        plt.gca().xaxis.set_major_locator(mdates.MonthLocator())
+        plt.xticks(rotation=45)
+
+        plt.legend(title='Currency Codes')
+
+        # Improve overall appearance
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.tight_layout()
+
+    else:
+        # Handle other chart types (e.g., bar) if needed
+        pass
+
+    # Display the plot
+    plt.show()
+
+    return "Here is the visualization as per your request."
+
