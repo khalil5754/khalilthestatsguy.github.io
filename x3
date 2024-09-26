@@ -1,261 +1,171 @@
-# app.py
+def query_dataframe(input: QueryDataFrameInput) -> str:
+    # Extract parameters
+    liquidity_variable_input = input.liquidity_variable.lower().strip()
+    time_to_maturity = input.time_to_maturity
+    region = input.region
+    fi_nonfi = input.fi_nonfi
+    ig_nonig = input.ig_nonig
 
-import os
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-from io import BytesIO
-from langchain.chat_models import ChatOpenAI
-from langchain.agents import initialize_agent, AgentType
-from langchain.memory import ConversationBufferMemory
-from langchain.callbacks import StreamlitCallbackHandler
-from langchain.callbacks.base import CallbackManager
-from langchain.tools import StructuredTool
-from langchain.schema import SystemMessage
+    # Map liquidity_variable
+    liquidity_variable_mapping = {
+        'japanese government bond': 'jp government bonds',
+        'uk corporate bond': 'uk corporate bonds',
+        'australian government bond': 'aus government bonds',
+        # Add more mappings as needed
+    }
 
-# Initialize session state variables
-if 'messages' not in st.session_state:
-    st.session_state['messages'] = []
+    liquidity_variable = liquidity_variable_mapping.get(liquidity_variable_input, liquidity_variable_input)
 
-if 'feedback' not in st.session_state:
-    st.session_state['feedback'] = []
+    # Normalize DataFrame columns for consistent comparison
+    df_liquidity['Liquidity Variable'] = df_liquidity['Liquidity Variable'].str.lower().str.strip()
+    df_liquidity['Region'] = df_liquidity['Region'].str.lower().str.strip()
+    df_liquidity['FI_NonFI'] = df_liquidity['FI_NonFI'].str.lower().str.strip()
+    df_liquidity['IG_NonIG'] = df_liquidity['IG_NonIG'].str.lower().str.strip()
+    df_liquidity['Time to Maturity'] = df_liquidity['Time to Maturity'].str.lower().str.strip()
 
-# Initialize the LLM with streaming and system prompt
-openai_api_key = os.environ.get("OPENAI_API_KEY")  # Replace with your method
-llm = ChatOpenAI(
-    model_name="gpt-4-0613",  # Ensure function calling support
-    temperature=0,
-    openai_api_base=os.environ.get("gw_base_url"),
-    openai_api_key=openai_api_key,
-    streaming=True,
+    # Apply filters
+    query_df = df_liquidity.copy()
+
+    # Liquidity Variable filter
+    query_df = query_df[query_df['Liquidity Variable'] == liquidity_variable]
+    if query_df.empty:
+        return f"No data found for Liquidity Variable: {liquidity_variable_input}"
+
+    # Time to Maturity mapping and filter
+    if time_to_maturity:
+        time_to_maturity = time_to_maturity.lower().strip()
+
+        # Map specific years to '< 5 years' or '> 5 years'
+        ttm_mapping = {
+            '1 year': '< 5 years',
+            '2 years': '< 5 years',
+            '3 years': '< 5 years',
+            '4 years': '< 5 years',
+            '5 years': '< 5 years',
+            '6 years': '> 5 years',
+            '7 years': '> 5 years',
+            '8 years': '> 5 years',
+            '9 years': '> 5 years',
+            '10 years': '> 5 years',
+        }
+        mapped_ttm = ttm_mapping.get(time_to_maturity, time_to_maturity)
+        query_df = query_df[query_df['Time to Maturity'] == mapped_ttm]
+        if query_df.empty:
+            return f"No data found for Time to Maturity: {time_to_maturity}"
+
+    # Region filter
+    if region:
+        region = region.lower().strip()
+        query_df = query_df[query_df['Region'] == region]
+        if query_df.empty:
+            return f"No data found for Region: {region}"
+
+    # FI_NonFI filter
+    if fi_nonfi:
+        fi_nonfi = fi_nonfi.lower().strip()
+        query_df = query_df[query_df['FI_NonFI'] == fi_nonfi]
+        if query_df.empty:
+            return f"No data found for FI_NonFI: {fi_nonfi}"
+
+    # IG_NonIG filter
+    if ig_nonig:
+        ig_nonig = ig_nonig.lower().strip()
+        query_df = query_df[query_df['IG_NonIG'] == ig_nonig]
+        if query_df.empty:
+            return f"No data found for IG_NonIG: {ig_nonig}"
+
+    if query_df.empty:
+        return "No data found for the given parameters."
+
+    # Limit DataFrame to first 10 columns
+    query_df = query_df.iloc[:, :10]
+
+    # Convert DataFrame to a string representation
+    result_table = query_df.to_markdown(index=False)
+
+    # Return the result as a string
+    return f"Here are the results based on your query:\n\n{result_table}"
+
+
+-------
+Option 1 (multi-retriever):
+from langchain.chains import RetrievalQA
+from langchain.retrievers.multi_query import MultiQueryRetriever
+
+# Initialize the multi-query retriever
+multi_query_retriever = MultiQueryRetriever.from_llm(
+    retriever=vectorstore.as_retriever(search_kwargs={"k": 10}),
+    llm=llm
 )
 
-# System prompt to guide the LLM
-system_prompt = """
-You are a helpful assistant for the corporate treasury department.
-
-When a user asks a question, determine the type of question:
-
-1. If the question is about 'haircut' (contains the keyword 'haircut'), collect necessary parameters and call the 'query_dataframe' function to get data.
-
-2. If the question is about FX Rates (e.g., involves currencies, exchange rates, dates), collect necessary parameters and call the 'visualize_fx_rates' function to generate the requested visualization.
-
-3. For other questions, use the 'retrieve_documents' function to search the corpus for relevant information, and provide an informative answer.
-
-Always ensure that you are polite and helpful. If any parameters are missing for a function, ask the user for the missing information.
-"""
-
-# Load your DataFrames
-# Liquidity Data
-df_liquidity = pd.read_csv('liquidity_data.csv')  # Replace with your actual CSV file path
-df_liquidity['Liquidity Variable'] = df_liquidity['Liquidity Variable'].str.lower()
-
-# FX Rates Data
-df_fx_rates = pd.read_csv('FX_Rates.csv')  # Replace with your actual CSV file path
-
-# Preprocess FX Rates Data
-# Melt the DataFrame to have dates in a single column
-date_columns = [col for col in df_fx_rates.columns if '-' in col]
-df_fx_rates_melted = df_fx_rates.melt(id_vars=['Currency', 'Name'], value_vars=date_columns,
-                                      var_name='Date', value_name='FX Rate')
-
-# Convert Date column to datetime
-df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%y-%b')
-
-# Define the query_dataframe function
-def query_dataframe(parameters: dict):
-    # [Implementation as before]
-    pass
-
-# Define the visualize_fx_rates function
-def visualize_fx_rates(parameters: dict):
-    # [Implementation as before]
-    pass
-
-# Define the retrieve_documents function
-def retrieve_documents(query):
-    # [Implementation as before]
-    pass
-
-# Define the tools
-tools = [
-    StructuredTool.from_function(
-        func=query_dataframe,
-        name="query_dataframe",
-        description="Queries the liquidity DataFrame based on parameters.",
-    ),
-    StructuredTool.from_function(
-        func=visualize_fx_rates,
-        name="visualize_fx_rates",
-        description="Visualizes FX Rates data based on user parameters.",
-    ),
-    StructuredTool.from_function(
-        func=retrieve_documents,
-        name="retrieve_documents",
-        description="Retrieves relevant documents from the corpus.",
-    )
-]
-
-# Initialize memory
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-# Initialize the agent with the system prompt
-agent = initialize_agent(
-    tools=tools,
+# Create the RetrievalQA chain
+qa_chain = RetrievalQA.from_chain_type(
     llm=llm,
-    agent=AgentType.OPENAI_FUNCTIONS,
-    verbose=True,
-    memory=memory,
-    agent_kwargs={"system_message": SystemMessage(content=system_prompt)}
+    chain_type="stuff",
+    retriever=multi_query_retriever
 )
 
-# Streamlit app
-def main():
-    st.set_page_config(page_title="Corporate Treasury Chatbot", layout="wide")
+Option 2 (bm25):
+from langchain.retrievers import BM25Retriever
+from langchain.docstore.document import Document
+bm25_retriever = BM25Retriever.from_documents(documents)
+bm25_retriever.k = 10
+# Initialize the vectorstore retriever
+vectorstore_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
-    # Apply custom CSS styles
-    st.markdown(
-        """
-        <style>
-        /* Main page styling */
-        .main {
-            background-color: #f0f2f6;
-        }
-        /* Chat message styling */
-        .user-message, .assistant-message {
-            padding: 10px;
-            border-radius: 10px;
-            margin: 10px 0;
-            max-width: 80%;
-        }
-        .user-message {
-            background-color: #dcf8c6;
-            align-self: flex-end;
-        }
-        .assistant-message {
-            background-color: #ffffff;
-            align-self: flex-start;
-        }
-        /* Message container */
-        .message-container {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-        }
-        /* Scrollbar styling */
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-        ::-webkit-scrollbar-thumb {
-            background-color: #c1c1c1;
-            border-radius: 4px;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+from typing import List
+from langchain.schema import BaseRetriever
 
-    st.title("💼 Corporate Treasury Chatbot")
+class EnsembleRetriever(BaseRetriever):
+    def __init__(self, retrievers: List[BaseRetriever], weights: List[float]):
+        self.retrievers = retrievers
+        self.weights = weights
 
-    # Sidebar with navigation and branding
-    with st.sidebar:
-        st.image("your_logo.png", use_column_width=True)  # Replace with your logo
-        st.markdown("### Navigation")
-        st.markdown("- Home")
-        st.markdown("- Settings")
-        st.markdown("- Help")
-        st.markdown("---")
-        st.markdown("**Version:** 1.0.0")
+    def get_relevant_documents(self, query: str) -> List[Document]:
+        # Get results from each retriever
+        results = []
+        for retriever, weight in zip(self.retrievers, self.weights):
+            docs = retriever.get_relevant_documents(query)
+            # Assign a score based on the weight
+            for doc in docs:
+                doc.metadata['score'] = doc.metadata.get('score', 0) + weight
+            results.extend(docs)
+        
+        # Remove duplicates by doc ID or content
+        unique_results = {}
+        for doc in results:
+            key = doc.metadata.get('source', doc.page_content)
+            if key in unique_results:
+                # If already exists, sum the scores
+                unique_results[key].metadata['score'] += doc.metadata['score']
+            else:
+                unique_results[key] = doc
 
-    # Conversation container
-    st.markdown("<div class='message-container'>", unsafe_allow_html=True)
-    for idx, message in enumerate(st.session_state['messages']):
-        if message['role'] == 'user':
-            st.markdown(
-                f"<div class='user-message'><strong>You:</strong><br>{message['content']}</div>",
-                unsafe_allow_html=True
-            )
-        elif message['role'] == 'assistant':
-            st.markdown(
-                f"<div class='assistant-message'><strong>Assistant:</strong><br>{message['content']}</div>",
-                unsafe_allow_html=True
-            )
+        # Sort documents by the combined score
+        sorted_docs = sorted(unique_results.values(), key=lambda d: d.metadata['score'], reverse=True)
 
-            # Feedback buttons
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                if st.button('👍', key=f'up_{idx}'):
-                    st.session_state['feedback'].append({'message_index': idx, 'feedback': 'up'})
-                    st.success("Feedback recorded: 👍")
-            with col2:
-                if st.button('👎', key=f'down_{idx}'):
-                    st.session_state['feedback'].append({'message_index': idx, 'feedback': 'down'})
-                    st.error("Feedback recorded: 👎")
-    st.markdown("</div>", unsafe_allow_html=True)
+        # Return top k documents
+        top_k = 5  # Adjust as needed
+        return sorted_docs[:top_k]
 
-    # User input at the bottom
-    st.markdown("---")
-    user_input = st.text_input("Type your message here...", key="user_input")
-    if st.button("Send", key="send_button"):
-        if user_input:
-            # Append user's message
-            st.session_state['messages'].append({"role": "user", "content": user_input})
+    async def aget_relevant_documents(self, query: str) -> List[Document]:
+        # Optional: Implement asynchronous retrieval if needed
+        pass
 
-            # Create a container for assistant's response
-            with st.spinner("Assistant is typing..."):
-                # Stream the LLM's response
-                st_callback = StreamlitCallbackHandler(st.empty())
+# Initialize the ensemble retriever
+ensemble_retriever = EnsembleRetriever(
+    retrievers=[vectorstore_retriever, bm25_retriever],
+    weights=[0.7, 0.3]  # Adjust weights as needed
+)
 
-                # Create a CallbackManager
-                callback_manager = CallbackManager([st_callback])
+# Create the RetrievalQA chain with the ensemble retriever
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    chain_type="stuff",
+    retriever=ensemble_retriever
+)
 
-                # Run the agent with streaming
-                try:
-                    agent_response = agent.run(
-                        input=user_input,
-                        callbacks=[callback_manager]
-                    )
-                except Exception as e:
-                    st.error(f"An error occurred: {str(e)}")
-                    agent_response = "I'm sorry, I encountered an error."
-
-                # Append assistant's response
-                st.session_state['messages'].append({"role": "assistant", "content": agent_response})
-
-            # Clear the input box after sending
-            st.session_state['user_input'] = ''
-
-if __name__ == '__main__':
-    main()
-
-Session State Initialization: Moved the initialization of st.session_state['messages'] and st.session_state['feedback'] to the top of the script, ensuring they're available before any access.
-
-Custom CSS Styling: Applied custom CSS to enhance the appearance of the chat interface, including background colors, message bubbles, and scrollbar styling.
-
-Sidebar with Branding:
-
-Added a sidebar containing a logo (replace "your_logo.png" with the path to your logo).
-Included navigation links and version information.
-Message Display:
-
-Replaced st.chat_message with custom HTML and CSS for broader compatibility and better control over styling.
-Displayed messages in styled message bubbles, differentiating between user and assistant messages.
-User Input Handling:
-
-Used st.text_input for the user input field.
-Added a "Send" button to submit messages.
-Cleared the input box after sending a message.
-Assistant Response:
-
-Displayed a spinner while the assistant is typing.
-Used st.empty() for streaming the assistant's response.
-Ensured that the assistant's response is appended to the conversation history.
-Feedback Mechanism:
-
-Placed feedback buttons (👍 and 👎) below each assistant message.
-Recorded feedback in st.session_state['feedback'].
-Code Organization:
-
-Ensured that all code accessing st.session_state variables is placed after their initialization.
-Used consistent naming and formatting throughout the script.
-
+def retrieve_documents(query: str) -> str:
+    # Use the qa_chain to retrieve and answer the query
+    result = qa_chain.run(query)
+    return result
