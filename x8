@@ -18,10 +18,8 @@ from langchain.retrievers import BM25Retriever, MultiVectorRetriever
 from langchain.agents import OpenAIFunctionsAgent
 from pydantic import BaseModel, Field
 from typing import Optional, List
-
-# Additional imports for visualization
 import matplotlib.pyplot as plt
-from IPython.display import display, clear_output
+from IPython.display import clear_output
 import json
 
 # Initialize conversation history
@@ -53,12 +51,14 @@ When a user asks a question, determine the type of question:
 4. For other questions, use the 'retrieve_documents' function to search the corpus for relevant information, and provide an informative answer.
 
 Always ensure that you are polite and helpful. If any parameters are missing for a function, ask the user for the missing information.
+
+When displaying visualizations, do not output any text.
 """
 
 # Load your DataFrames
 # Liquidity Data
 df_liquidity = pd.read_csv('liquidity_data.csv')  # Replace with your actual CSV file path
-df_liquidity['Liquidity Variable'] = df_liquidity['Liquidity Variable'].str.lower()
+df_liquidity['Liquidity Variable'] = df_liquidity['Liquidity Variable'].str.lower().str.strip()
 
 # FX Rates Data
 df_fx_rates = pd.read_csv('FX_Rates.csv')  # Replace with your actual CSV file path
@@ -73,8 +73,12 @@ df_fx_rates_melted = df_fx_rates.melt(
     value_name='FX Rate'
 )
 
+# Normalize Currency codes
+df_fx_rates_melted['Currency'] = df_fx_rates_melted['Currency'].str.upper().str.strip()
+
 # Convert Date column to datetime
-df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%y-%b')
+# Adjust the date parsing format to match your data
+df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%b-%y')
 
 # FLAME Data for FTP computation
 df_flame = pd.read_excel('FLAME_data_cleaned.xlsx')
@@ -105,7 +109,7 @@ class ComputeFTPInput(BaseModel):
 # Function to visualize FX rates
 def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     # Extract parameters
-    currency_codes = input.currency_codes
+    currency_codes = [code.upper().strip() for code in input.currency_codes]
     start_period = input.start_period
     end_period = input.end_period
     comparison_type = input.comparison_type.lower()
@@ -114,27 +118,23 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     # Validate inputs
     if not currency_codes:
         return "Missing required parameter: currency_codes."
-    
+
     # Handle 'YTD' or missing periods
-    if start_period is None or end_period is None or 'ytd' in (start_period.lower(), end_period.lower()):
+    if (start_period is None or 'ytd' in start_period.lower()) and (end_period is None or 'ytd' in end_period.lower()):
         # Set to earliest and latest months in the data
-        start_period = df_fx_rates_melted['Date'].dt.strftime('%B').min()
-        end_period = df_fx_rates_melted['Date'].dt.strftime('%B').max()
-
-    # Extract the year from the data
-    unique_years = df_fx_rates_melted['Date'].dt.year.unique()
-    if len(unique_years) == 1:
-        data_year = unique_years[0]
+        start_date = df_fx_rates_melted['Date'].min()
+        end_date = df_fx_rates_melted['Date'].max()
     else:
-        # Handle multiple years if necessary
-        data_year = unique_years.max()
-
-    # Convert periods to datetime using the data_year
-    try:
-        start_date = pd.to_datetime(f"{data_year} {start_period}", format='%Y %B')
-        end_date = pd.to_datetime(f"{data_year} {end_period}", format='%Y %B')
-    except Exception as e:
-        return f"Invalid date format: {e}"
+        # Convert periods to datetime
+        try:
+            start_date = pd.to_datetime(start_period, format='%B')
+            end_date = pd.to_datetime(end_period, format='%B')
+            # Assign the year from the data
+            data_year = df_fx_rates_melted['Date'].dt.year.unique()[0]
+            start_date = start_date.replace(year=data_year)
+            end_date = end_date.replace(year=data_year)
+        except Exception as e:
+            return f"Invalid date format: {e}"
 
     # Ensure start_date is before end_date
     if start_date > end_date:
@@ -173,10 +173,10 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     # Perform comparison
     if comparison_type == 'difference':
         df_diff = df_pivot.iloc[-1] - df_pivot.iloc[0]
-        title = f"Difference in FX Rates between {start_period} and {end_period}"
+        title = f"Difference in FX Rates between {start_date.strftime('%B')} and {end_date.strftime('%B')}"
     elif comparison_type == 'percentage difference':
         df_diff = ((df_pivot.iloc[-1] - df_pivot.iloc[0]) / df_pivot.iloc[0]) * 100
-        title = f"Percentage Difference in FX Rates between {start_period} and {end_period}"
+        title = f"Percentage Difference in FX Rates between {start_date.strftime('%B')} and {end_date.strftime('%B')}"
     else:
         return "Invalid comparison type. Please specify 'difference' or 'percentage difference'."
 
@@ -191,25 +191,17 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     if chart_type == 'bar':
         df_diff.plot(kind='bar', legend=False)
     else:
-        df_diff.plot(legend=False)
+        df_pivot.plot()
+        title = f"FX Rates from {start_date.strftime('%B')} to {end_date.strftime('%B')}"
 
     plt.title(title)
-    plt.ylabel('Percentage Difference (%)' if 'percentage' in comparison_type else 'FX Rate Difference')
-    plt.xlabel('Currency Code')
-
-    # Annotate the currency with the highest difference
-    try:
-        max_currency = df_diff.idxmax()
-        max_value = df_diff.max()
-        plt.annotate(f'Highest: {max_currency}', xy=(df_diff.index.get_loc(max_currency), max_value), xytext=(0, 10),
-                     textcoords='offset points', ha='center', va='bottom', fontsize=12, color='red')
-    except Exception as e:
-        print(f"Annotation error: {e}")
+    plt.ylabel('Percentage Difference (%)' if 'percentage' in comparison_type else 'FX Rate')
+    plt.xlabel('Date' if chart_type != 'bar' else 'Currency Code')
 
     # Display the plot
     plt.show()
 
-    return "Here is the visualization as per your request."
+    return ""
 
 # Function to query the liquidity DataFrame
 def query_dataframe(input: QueryDataFrameInput) -> str:
@@ -224,7 +216,9 @@ def query_dataframe(input: QueryDataFrameInput) -> str:
     liquidity_variable_mapping = {
         'japanese government bond': 'jp government bonds',
         'uk corporate bond': 'uk corporate bonds',
+        'uk government bond': 'uk government bonds',
         'australian government bond': 'aus government bonds',
+        'uk government bonds': 'uk government bonds',
         # Add more mappings as needed
     }
 
@@ -245,7 +239,7 @@ def query_dataframe(input: QueryDataFrameInput) -> str:
     if query_df.empty:
         return f"No data found for Liquidity Variable: {liquidity_variable_input}"
 
-    # Time to Maturity mapping and filter
+    # Time to Maturity mapping and filter (only if specified)
     if time_to_maturity:
         time_to_maturity = time_to_maturity.lower().strip()
 
@@ -291,8 +285,9 @@ def query_dataframe(input: QueryDataFrameInput) -> str:
     if query_df.empty:
         return "No data found for the given parameters."
 
-    # Limit DataFrame to first 10 columns
-    query_df = query_df.iloc[:, :10]
+    # Select only the specified columns
+    columns_of_interest = ['Liquidity Variable', 'Time to Maturity', 'Region', 'Haircut']
+    query_df = query_df[columns_of_interest]
 
     # Convert DataFrame to string for output
     result_str = query_df.to_string(index=False)
@@ -442,6 +437,7 @@ if user_input:
     dbutils.widgets.remove("Text Box")
     dbutils.widgets.text("Text Box", "", "Enter your query here")
 
-    # Display the assistant's response
-    print("\nAssistant:")
-    print(assistant_response)
+    # Display the assistant's response if it's not empty
+    if assistant_response:
+        print("\nAssistant:")
+        print(assistant_response)
