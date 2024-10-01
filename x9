@@ -1,0 +1,206 @@
+def extract_query_dataframe_parameters(user_query: str) -> QueryDataFrameInput:
+    # Use the LLM to extract parameters
+    prompt = f"""
+You are an assistant that extracts parameters for querying a liquidity DataFrame.
+
+Extract the following parameters from the user's query:
+- liquidity_variable (required)
+- time_to_maturity (optional)
+- region (optional)
+- fi_nonfi (optional)
+- ig_nonig (optional)
+
+User's query: "{user_query}"
+
+Provide the parameters in JSON format like:
+{{
+    "liquidity_variable": "value",
+    "time_to_maturity": "value or null",
+    "region": "value or null",
+    "fi_nonfi": "value or null",
+    "ig_nonig": "value or null"
+}}
+
+If a parameter is not specified, set it to null.
+"""
+
+    response = llm.predict(prompt).strip()
+
+    # Parse the JSON response
+    try:
+        params = json.loads(response)
+    except json.JSONDecodeError:
+        raise ValueError(f"Failed to parse parameters from LLM response: {response}")
+
+    # Create the input object
+    input_data = QueryDataFrameInput(
+        liquidity_variable=params.get("liquidity_variable"),
+        time_to_maturity=params.get("time_to_maturity"),
+        region=params.get("region"),
+        fi_nonfi=params.get("fi_nonfi"),
+        ig_nonig=params.get("ig_nonig"),
+    )
+
+    return input_data
+
+#before calling query_dataframe:
+if 'query_dataframe' in function_to_call:
+    input_data = extract_query_dataframe_parameters(user_input)
+    assistant_response = query_dataframe(input_data)
+
+#modify query_dataframe as follows:
+# Time to Maturity mapping and filter (only if specified)
+if time_to_maturity:
+    time_to_maturity = time_to_maturity.lower().strip()
+    mapped_ttm = ttm_mapping.get(time_to_maturity, time_to_maturity)
+    query_df = query_df[query_df['Time to Maturity'] == mapped_ttm]
+    if query_df.empty:
+        return f"No data found for Time to Maturity: {time_to_maturity}"
+
+system_prompt = """
+You are a helpful assistant for the corporate treasury department.
+
+When a user asks a question, determine the type of question:
+
+1. If the question is about 'haircut' or 'FTP rate' (contains the keyword 'haircut' or 'FTP'), collect necessary parameters and call the 'compute_ftp_rate' function to get data.
+
+2. If the question is about FX Rates (e.g., involves currencies, exchange rates, dates), collect necessary parameters and call the 'visualize_fx_rates' function to generate the requested visualization.
+
+3. If the question is about liquidity variables, time to maturity, regions, etc., collect necessary parameters and call the 'query_dataframe' function.
+
+4. For other questions, use the 'retrieve_documents' function to search the corpus for relevant information, and provide an informative answer.
+
+Always ensure that you are polite and helpful. If any parameters are missing for a function, ask the user for the missing information.
+
+Examples:
+
+- User: "What is the haircut for UK government bonds?"
+  Assistant: Calls 'query_dataframe' with liquidity_variable='UK government bonds', time_to_maturity=null, region=null, fi_nonfi=null, ig_nonig=null.
+
+- User: "Show me data for German government bonds with a time to maturity of 1 year."
+  Assistant: Calls 'query_dataframe' with liquidity_variable='German government bonds', time_to_maturity='1 year', region=null, fi_nonfi=null, ig_nonig=null.
+
+- User: "What is the haircut for UK government bonds?"
+  Assistant: Calls 'query_dataframe' with liquidity_variable='UK government bonds', time_to_maturity=null, region=null, fi_nonfi=null, ig_nonig=null.
+
+When displaying visualizations, do not output any text.
+"""
+
+def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
+    # ... [existing code to process inputs and filter data] ...
+
+    # Perform comparison
+    if comparison_type == 'difference':
+        df_diff = df_pivot.diff()
+        title = f"Difference in FX Rates Over Time"
+    elif comparison_type == 'percentage difference':
+        df_diff = df_pivot.pct_change() * 100
+        title = f"Percentage Difference in FX Rates Over Time"
+    else:
+        df_diff = df_pivot
+        title = f"FX Rates Over Time"
+
+    # Drop NaN values from df_diff
+    df_diff.dropna(inplace=True)
+
+    if df_diff.empty:
+        return "No data available after calculating differences."
+
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    if chart_type == 'bar':
+        # For bar chart, plot the final differences
+        df_diff.iloc[-1].plot(kind='bar', legend=False)
+        plt.xlabel('Currency Code')
+        plt.ylabel('Percentage Difference (%)' if 'percentage' in comparison_type else 'FX Rate Difference')
+    else:
+        # For line chart, plot differences over time
+        df_diff.plot()
+        plt.xlabel('Date')
+        plt.ylabel('Percentage Difference (%)' if 'percentage' in comparison_type else 'FX Rate')
+
+    plt.title(title)
+    plt.show()
+
+    return ""
+-----------------------------
+# app.py
+
+# [Previous imports remain the same]
+
+# Initialize the LLM
+# [Initialization code remains the same]
+
+# Update the system prompt
+system_prompt = """
+You are a helpful assistant for the corporate treasury department.
+
+[... Updated system prompt with examples as shown above ...]
+
+"""
+
+# Define input schemas using Pydantic models
+# [Schemas remain the same]
+
+# Function to extract parameters for query_dataframe
+def extract_query_dataframe_parameters(user_query: str) -> QueryDataFrameInput:
+    # [Parameter extraction function as shown above]
+    # ... [Function code here] ...
+
+# Function to visualize FX rates
+def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
+    # [Updated function code as shown above]
+    # ... [Function code here] ...
+
+# Function to query the liquidity DataFrame
+def query_dataframe(input: QueryDataFrameInput) -> str:
+    # [Existing code, ensure TTM mapping is updated]
+    # ... [Function code here] ...
+
+# [Other functions remain the same]
+
+# Agent setup
+# [Agent setup code remains the same]
+
+# Modify the agent to use parameter extraction for query_dataframe
+def assistant_function(user_input):
+    # Determine which function to call
+    # For simplicity, let's assume we have a way to get the function name (e.g., from the LLM)
+    function_to_call = agent.get_function_name(user_input)
+
+    if function_to_call == 'query_dataframe':
+        input_data = extract_query_dataframe_parameters(user_input)
+        assistant_response = query_dataframe(input_data)
+    else:
+        # Let the agent handle other functions
+        assistant_response = agent_executor.run(input=user_input)
+
+    return assistant_response
+
+# Get user input from the Databricks widget
+dbutils.widgets.text("Text Box", "", "Enter your query here")
+user_input = dbutils.widgets.get("Text Box")
+
+if user_input:
+    # Append user's message to conversation history
+    conversation_history.append({"role": "user", "content": user_input})
+
+    # Run the assistant function with exception handling
+    print("Assistant is typing...")
+    try:
+        assistant_response = assistant_function(user_input)
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        assistant_response = "I'm sorry, I encountered an error."
+
+    # Append assistant's response to conversation history
+    conversation_history.append({"role": "assistant", "content": assistant_response})
+
+    # Clear the widget value for the next input
+    dbutils.widgets.remove("Text Box")
+    dbutils.widgets.text("Text Box", "", "Enter your query here")
+
+    # Display the assistant's response if it's not empty
+    if assistant_response:
+        print("\nAssistant:")
+        print(assistant_response)
