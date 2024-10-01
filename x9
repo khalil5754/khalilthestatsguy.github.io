@@ -4,16 +4,6 @@ import seaborn as sns
 # Set seaborn style and palette
 sns.set(style="whitegrid")
 palette = sns.color_palette("pastel")
-
-# Updated VisualizeFXRatesInput class
-class VisualizeFXRatesInput(BaseModel):
-    currency_codes: List[str] = Field(description="List of currency codes.")
-    start_period: Optional[str] = Field(default=None, description="Start period (e.g., 'January'). If 'YTD' is specified, it will be set to earliest month in data.")
-    end_period: Optional[str] = Field(default=None, description="End period (e.g., 'August'). If 'YTD' is specified, it will be set to latest month in data.")
-    comparison_type: Optional[str] = Field(default=None, description="'difference', 'percentage difference', or None.")
-    chart_type: Optional[str] = Field(default='line', description="'line' or 'bar'.")
-
-# Updated visualize_fx_rates function
 def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     # Extract parameters
     currency_codes = [code.upper().strip() for code in input.currency_codes]
@@ -26,20 +16,29 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     if not currency_codes:
         return "Missing required parameter: currency_codes."
 
+    # Parse the 'Date' column in the data using the correct format
+    df_fx_rates_melted['Date'] = pd.to_datetime(df_fx_rates_melted['Date'], format='%b-%y')
+
     # Handle 'YTD' or missing periods
     if (start_period is None or 'ytd' in start_period.lower()) and (end_period is None or 'ytd' in end_period.lower()):
         # Set to earliest and latest dates in the data
         start_date = df_fx_rates_melted['Date'].min()
         end_date = df_fx_rates_melted['Date'].max()
     else:
+        # Extract the year(s) from the data
+        data_years = df_fx_rates_melted['Date'].dt.year.unique()
+        if len(data_years) == 1:
+            data_year = data_years[0]
+        else:
+            # Handle multiple years if necessary
+            data_year = data_years.max()  # You might want to prompt the user for the year
+
         # Convert periods to datetime
         try:
-            start_date = pd.to_datetime(start_period, format='%B')
-            end_date = pd.to_datetime(end_period, format='%B')
-            # Assign the year from the data
-            data_year = df_fx_rates_melted['Date'].dt.year.unique()[0]
-            start_date = start_date.replace(year=data_year)
-            end_date = end_date.replace(year=data_year)
+            start_date_str = f"{start_period}-{str(data_year)[-2:]}"
+            end_date_str = f"{end_period}-{str(data_year)[-2:]}"
+            start_date = pd.to_datetime(start_date_str, format='%b-%y')
+            end_date = pd.to_datetime(end_date_str, format='%b-%y')
         except Exception as e:
             return f"Invalid date format: {e}"
 
@@ -111,6 +110,7 @@ def visualize_fx_rates(input: VisualizeFXRatesInput) -> str:
     plt.show()
 
     return ""
+
 
 
 ---------------------------------------------------------------------
