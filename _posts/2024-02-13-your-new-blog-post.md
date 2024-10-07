@@ -1,4 +1,4 @@
-## Data 605: Using Visualizations to Analyze Canadian Foreign Direct Investment
+Using Visualizations to Analyze Canadian Foreign Direct Investment
 
 #### For this post let's stick to a topic I know quite well and dive into...
 
